@@ -1,0 +1,6 @@
+#!/bin/bash
+
+xargs -L 1 -I {} -P 2 bash -c '{}' <<"EOF"
+srun echo `hostname` `pwd` && hostname && sleep 3
+srun echo `hostname` `pwd` && hostname && sleep 3
+EOF

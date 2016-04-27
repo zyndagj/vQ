@@ -1,0 +1,12 @@
+#!/bin/bash
+
+xargs -L 1 -I {} -P 2 bash -c '{}' <<"EOF"
+srun date
+srun date
+sbatch date
+sbatch date
+sbatch -o cats.txt date
+sbatch -J shoop hostname
+srun -J loop hostname
+me
+EOF
