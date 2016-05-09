@@ -2,7 +2,7 @@
 
 import multiprocessing
 import subprocess as sp
-import os, re, sys, socket, logging
+import os, re, sys, socket, logging, signal
 from threading import Thread, activeCount
 from Queue import Queue
 from distutils.spawn import find_executable
@@ -48,7 +48,7 @@ class SysConfig:
 		# TODO: add checks for lsf and pbs
 		if find_executable('srun'):
 			self.queue = 'slurm'
-			self.progs = ('srun','sbatch')
+			self.progs = ('srun','sbatch','scancel')
 		elif find_executable('qsub'):
 			self.queue = 'sge'
 			self.progs = ('qsub',)
@@ -208,6 +208,22 @@ def sanitizeMsg(msg, prog):
 def clientSendWork(clisock):
 	# Send command
 	msg = ' '.join(sys.argv[1:])
+	if sys.argv[1] == 'scancel':
+		clisock.close()
+		clisock = socket.socket( socket.AF_INET, socket.SOCK_STREAM )
+		connectError = clisock.connect_ex(('localhost', 23001))
+		if connectError:
+			logger.critical("Could not connect to the cancel server")
+			sys.exit(1)
+		msg = clisock.recv(1)
+		if msg == '1':
+			clisock.send('1')
+			clisock.close()
+			logger.info("Sent cancel command")
+			sys.exit(0)
+		else:
+			logger.critical("Got wrong message from cancel server")
+			sys.exit(1)
 	## todo: parse out srun arguments
 	clisock.recv(1)
 	logger.debug("Client Sending: %s"%(msg))
@@ -243,15 +259,17 @@ def main():
 		global serverConfig
 		serverConfig = SysConfig() # env, nodeList, cwd, hostName
 		clisock.close()
-		srvsock = startServer()
+		srvsock, cansock = startServer()
 		threadArray = startThreads(serverConfig.nodeList)
+		# Run main process
 		mp = runCMD(serverConfig.progs)
-		processTasks(srvsock, mp)
+		# Listen for incoming work
+		processTasks(srvsock, cansock, mp, threadArray)
+		# Shut down socket servers and wait for tasks to terminate
+		cansock.close()
 		stop(srvsock, serverConfig.nodeList)
 	else:
 		isInteractive = clientSendWork(clisock)
-		if isInteractive:
-			receiveOutput(clisock)
 
 def startServer(port=23000):
 	srvsock = socket.socket( socket.AF_INET, socket.SOCK_STREAM )
@@ -259,7 +277,12 @@ def startServer(port=23000):
 	srvsock.bind( ('localhost', port) )
 	srvsock.listen(5)
 	logger.info('vQ server started on port %i'%(port))
-	return srvsock
+	cansock = socket.socket( socket.AF_INET, socket.SOCK_STREAM )
+	cansock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+	cansock.bind( ('localhost', port+1) )
+	cansock.listen(5)
+	logger.info('vQ cancel listener started on port %i'%(port+1))
+	return srvsock, cansock
 
 def addRedirects(sanCmd, sOut, sErr):
 	'''
@@ -290,7 +313,8 @@ def addRedirects(sanCmd, sOut, sErr):
 	
 
 # Start worker pool
-def worker(host):
+def worker(pid, host):
+	global popenArray
 	for item, taskCounter in iter(wQ.get, 'STOP'):
 		jobNum = "%05i"%(taskCounter)
 		csock, (h,a) = item
@@ -312,9 +336,10 @@ def worker(host):
 		# ssh to external nodes
 		logger.debug("%s running: %s"%(host, sanCmd))
 		if host != serverConfig.hostName:
-			sanCmd = "ssh %s 'cd %s && env %s > /dev/null && %s'"%(host, serverConfig.cwd, serverConfig.env, sanCmd)
+			sanCmd = "ssh -t -t %s 'cd %s && env %s > /dev/null && %s'"%(host, serverConfig.cwd, serverConfig.env, sanCmd)
 		# Run the command
 		proc = sp.Popen(sanCmd, stdout=sp.PIPE, stderr=sp.PIPE, shell=True)
+		popenArray[pid] = proc.pid
 		# Get the output / Block
 		so, se = proc.communicate()
 		if splitCmd[0] in ('srun',): # interactive
@@ -339,8 +364,10 @@ def startThreads(nodeList):
 	wQ = Queue()
 
 	threadArray = []
+	global popenArray
+	popenArray = [0]*len(nodeList)
 	for i in range(len(nodeList)):
-		threadArray.append(Thread(target=worker, args=[nodeList[i]]))
+		threadArray.append(Thread(target=worker, args=[i, nodeList[i]]))
 		threadArray[i].daemon = True
 		threadArray[i].start()
 	logger.debug('vQ worker pool started with %i workers\n'%(len(nodeList)))
@@ -351,14 +378,28 @@ def runCMD(progs):
 	mainCmd = ' '.join(sys.argv[1:])
 	logger.info("Launching: %s"%(mainCmd))
 	logger.info("Overloading %s"%(', '.join(progs)))
-	overloadStr = ' '.join(['%s () { python vQ.py %s \$@; }; export -f %s;'%(prog, prog, prog) for prog in progs])
+	overloadStr = ' '.join(['%s () { vQ.py %s \$@; }; export -f %s;'%(prog, prog, prog) for prog in progs])
 	unsetStr = ' '.join(['unset -f %s;'%(prog) for prog in progs])
 	mp = sp.Popen('bash -c "%s %s; %s"'%(overloadStr, mainCmd, unsetStr), shell=True)
 	return mp
 
-def processTasks(srvsock, mp):
+def kill(srvsock, threadArray):
+	global popenArray
+	# Kill srvsock so no new tasks can be added
+	srvsock.close()
+	for taskID in xrange(len(popenArray)):
+		# Kill popen work
+		if popenArray[taskID]:
+			os.killpg(os.getpgid(popenArray[taskID]), signal.SIGTERM)
+		# Kill threads
+		threadArray[i].join()
+	logger.info("Killed all work and exiting")
+	sys.exit(0)
+
+def processTasks(srvsock, cansock, mp, threadArray):
 	# Listen for incoming sockets
-	srvsock.settimeout(3)
+	srvsock.settimeout(2)
+	cansock.settimeout(2)
 	taskCounter = 1
 	while 1:
 		try:
@@ -370,10 +411,24 @@ def processTasks(srvsock, mp):
 			pass
 		except KeyboardInterrupt:
 			logger.debug("Received keyboard interrupt")
+			os.killpg(os.getpgid(mp.pid), signal.SIGTERM)
+			kill(srvsock, threadArray)
 			break
+		try:
+			cancelmsg, (h,a) = cansock.accept()
+			cancelmsg.send('1')
+			if cancelmsg.recv(1) == '1':
+				logger.warn("vQ received cancel request")
+				kill(srvsock, threadArray)
+		except socket.timeout:
+			pass
+		except KeyboardInterrupt:
+			logger.debug("Received keyboard interrupt")
+			os.killpg(os.getpgid(mp.pid), signal.SIGTERM)
+			kill(srvsock, threadArray)
 		if mp.poll() is not None:
 			logger.info("Main process complete")
-			logger.info("Killing server and waiting for jobs to complete")
+			logger.info("Stopping server and waiting for jobs to complete")
 			break
 
 def stop(srvsock, nodeList):
@@ -382,11 +437,11 @@ def stop(srvsock, nodeList):
 	wQ.join()
 
 	# Stop workers
-	sys.stderr.write("Stopping workers... ")
+	logger.info("Stopping workers... ")
 	for i in range(len(nodeList)):
 		wQ.put("STOP")
 	wQ.join()
-	sys.stderr.write("Stopped.\n")
+	logger.info("Stopped.")
 
 if __name__ == "__main__":
 	main()

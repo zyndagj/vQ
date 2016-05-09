@@ -1,0 +1,6 @@
+#!/bin/bash
+
+sbatch sleep 30
+sbatch sleep 30
+scancel bears
+sbatch sleep 30
