@@ -363,14 +363,24 @@ def startThreads(nodeList):
 	global wQ
 	wQ = Queue()
 
+	# See if more than one process per node
+	ppn = os.environ.get("VQ_PPN")
+	if ppn:
+		ppn = int(ppn)
+		logger.info("Launching %i processes per node"%(ppn))
+	else:
+		ppn = 1
+
 	threadArray = []
 	global popenArray
-	popenArray = [0]*len(nodeList)
-	for i in range(len(nodeList)):
-		threadArray.append(Thread(target=worker, args=[i, nodeList[i]]))
-		threadArray[i].daemon = True
-		threadArray[i].start()
-	logger.debug('vQ worker pool started with %i workers\n'%(len(nodeList)))
+	popenArray = [0]*len(nodeList)*ppn
+	for j in xrange(ppn):
+		for i in xrange(len(nodeList)):
+			tID = len(nodeList)*j+i
+			threadArray.append(Thread(target=worker, args=[tID, nodeList[i]]))
+			threadArray[tID].daemon = True
+			threadArray[tID].start()
+	logger.debug('vQ worker pool started with %i workers'%(len(threadArray)))
 	return threadArray
 
 def runCMD(progs):

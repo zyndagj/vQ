@@ -8,5 +8,4 @@ sbatch date
 sbatch -o cats.txt date
 sbatch -J shoop hostname
 srun -J loop hostname
-me
 EOF
