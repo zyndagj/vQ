@@ -12,7 +12,7 @@ When resources are in short supply, the wait times for each task lead to sub-lin
 
 To improve the run times for such tasks, we developed the vQ, a virtual queue for multi-node jobs that will dynamically balance the execution of tasks issued with normal SLURM, SGE, TORQUE, and OpenLava (LSF) commands across a pre-allocated set of computing nodes on a shared resource.
 We show that this drop-in solution removes queue overhead and improves the experience of running complicated workflows like Trinity, SMRT, Falcon, Canu, Celera, and Cluster Flow.
-Most importantly, unlike solutions like [Makeflow](http://ccl.cse.nd.edu/software/makeflow/) or TACC's Launcher utilities ([launcher](https://github.com/TACC/launcher) and [pylauncher](https://github.com/TACC/pylauncher))which assume the tasks in a workflow can be described in a simple text file \cite{wilson2014launcher, eijkhout2012}, vQ requires no modifications to the original tools and works out-of-the-box with a minimal, user-level installation.
+Most importantly, unlike solutions like [Makeflow](http://ccl.cse.nd.edu/software/makeflow/) or TACC's Launcher utilities ([launcher](https://github.com/TACC/launcher) and [pylauncher](https://github.com/TACC/pylauncher)) which assume the tasks in a workflow can be described in a simple text file, vQ requires no modifications to the original tools and works out-of-the-box with a minimal, user-level installation.
 
 ## Usage
 
