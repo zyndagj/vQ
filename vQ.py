@@ -239,9 +239,11 @@ def clientSendWork(clisock):
 		if intSizes[0]:
 			out = msg[:intSizes[0]].rstrip('\n')
 			logger.debug("Client got out: %s"%(out))
+			if out: sys.stdout.write(out+"\n")
 		if intSizes[1]:
 			err = msg[intSizes[0]:intSizes[1]]
 			logger.debug("Client got err: %s"%(err))
+			if err: sys.stderr.write(err+"\n")
 		if intSizes[2]:
 			ret = msg[-intSizes[2]:]
 			logger.debug("Client got ret: %s"%(ret))
@@ -415,7 +417,7 @@ def processTasks(srvsock, cansock, mp, threadArray):
 		try:
 			wQ.put((srvsock.accept(),taskCounter))
 			taskCounter += 1
-			logger.debug("Server accepted a connection\n")
+			logger.debug("Server accepted a connection")
 		except socket.timeout:
 			logger.debug("Checking status of main process")
 			pass
