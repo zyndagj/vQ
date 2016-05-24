@@ -83,13 +83,13 @@ Now, the same program with verbose logging enabled
 
 ```shell
 $ export VQ_LOG=True
-gzynda@Sc442-001[test_programs]$ vQ.py helloWorld
+$ vQ.py helloWorld
 [vQ - 2016-05-24 15:21:54,304] Detected slurm scheduler
 [vQ - 2016-05-24 15:21:54,304] SERVER detected slurm scheduler
 [vQ - 2016-05-24 15:21:54,316] SERVER found nodes:
  - c442-001
  - c442-003
-[vQ - 2016-05-24 15:21:54,316] SERVER cwd: /home1/03076/gzynda/vQ/test_programs
+[vQ - 2016-05-24 15:21:54,316] SERVER cwd: /home/user/vQ/test_programs
 [vQ - 2016-05-24 15:21:54,324] vQ server started on port 23000
 [vQ - 2016-05-24 15:21:54,331] vQ cancel listener started on port 23001
 [vQ - 2016-05-24 15:21:54,331] vQ worker pool started with 2 workers
