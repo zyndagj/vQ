@@ -42,6 +42,7 @@ class SysConfig:
 		else:
 			logger.error("vQ does not currently support %s"%(self.queue))
 			sys.exit(0)
+		self.master = socket.gethostname()
 		self.nodeList = sp.check_output(nCMD, shell=True).rstrip('\n').split('\n')
 		logger.debug("SERVER found nodes:\n - %s"%('\n - '.join(self.nodeList)))
 	def getQueue(self):
@@ -162,7 +163,7 @@ def sanitizeMsg(msg, prog):
 					if sMsg[argI] in map(lambda x:x[1], slurmNA):
 						pass
 					else:
-						logger.error('Non-srun argument before CMD: %s'%(msg))
+						logger.error('Non-sbatch argument before CMD: %s'%(msg))
 						sys.exit(1)
 				else:
 					arg, val = sMsg[argI].split('=')
@@ -178,8 +179,9 @@ def sanitizeMsg(msg, prog):
 						elif arg == '--job-name':
 							name = val
 					else:
-						logger.error('Non-srun argument before CMD: %s'%(msg))
-						sys.exit(1)
+						logger.error('Non-sbatch argument before CMD: %s'%(msg))
+						pass
+						#sys.exit(1)
 					
 			# Single dash
 			else:
@@ -189,7 +191,7 @@ def sanitizeMsg(msg, prog):
 				# Args
 				elif sMsg[argI] in map(lambda x: x[0], slurmA):
 					if sMsg[argI+1][0] == '-':
-						logger.error('%s should have a value for srun: %s'%(sMsg[argI]), msg)
+						logger.error('%s should have a value for srun: %s'%(sMsg[argI], msg))
 						sys.exit(1)
 					elif sMsg[argI] == '-o':
 						out = sMsg[argI+1]
@@ -224,11 +226,13 @@ def clientSendWork(clisock):
 		else:
 			logger.critical("Got wrong message from cancel server")
 			sys.exit(1)
-	## todo: parse out srun arguments
-	clisock.recv(1)
-	logger.debug("Client Sending: %s"%(msg))
-	clisock.sendall(msg)
 	if sys.argv[1] in ('srun',):
+		logger.debug("Client sending interative")
+		clisock.send('1') # indicates interactive
+		logger.debug("Client waiting for recv: %s"%(msg))
+		clisock.recv(1)
+		logger.debug("Client Sending: %s"%(msg))
+		clisock.sendall(msg)
 		# Receive output
 		logger.debug("Client waiting for sizes")
 		sizes = clisock.recv(20)
@@ -250,6 +254,11 @@ def clientSendWork(clisock):
 		clisock.close()
 		sys.exit(int(ret))
 	else:
+		logger.debug("Client sending batch")
+		clisock.send('0') # indicates batch
+		logger.debug("Client waiting for recv: %s"%(msg))
+		clisock.recv(1)
+		clisock.sendall(msg)
 		clisock.close()
 		sys.exit(0)
 
@@ -317,12 +326,19 @@ def addRedirects(sanCmd, sOut, sErr):
 # Start worker pool
 def worker(pid, host):
 	global popenArray
+	global states
 	for item, taskCounter in iter(wQ.get, 'STOP'):
+		states[pid] = 1
 		jobNum = "%05i"%(taskCounter)
-		csock, (h,a) = item
-		# Ask for work
-		csock.send('1')
-		cmd = csock.recv(5000)
+		csock = ""
+		if len(item) == 1: #batch
+			cmd = item[0]
+		else: #interactive
+			csock, (h,a) = item
+		if csock:
+			# Ask for work
+			csock.send('1')
+			cmd = csock.recv(5000)
 		logger.debug("%s worker got: %s"%(host, cmd))
 		# Sanitize the cmd of scheduler arguments
 		splitCmd = cmd.split(' ')
@@ -330,21 +346,26 @@ def worker(pid, host):
 		# Make a task name with counter
 		taskName = "%s_%05i"%(jName,taskCounter)
 		# Force redirrection on non-interactive commands
-		if splitCmd[0] not in ('srun',):# not interactive
+		if not csock:# not interactive
 			if not sOut: sOut = "%s.o"%(taskName)
 			if not sErr: sErr = "%s.e"%(taskName)
 		sanCmd = addRedirects(sanCmd, sOut, sErr)
 		logger.debug("Added redirects: %s"%(sanCmd))
 		# ssh to external nodes
 		logger.debug("%s running: %s"%(host, sanCmd))
+		passProgs = ('sbatch','qsub')
 		if host != serverConfig.hostName:
-			sanCmd = "ssh -t -t %s 'cd %s && env %s > /dev/null && %s'"%(host, serverConfig.cwd, serverConfig.env, sanCmd)
+			overloadStr = ' '.join(['%s () { ssh %s "vQ.py %s $@"; }; export -f %s;'%(prog, serverConfig.master, prog, prog) for prog in passProgs])
+			sanCmd = "ssh -t -t %s 'cd %s && export %s  && %s %s'"%(host, serverConfig.cwd, serverConfig.env, overloadStr, sanCmd)
+		else:
+			overloadStr = ' '.join(['%s () { vQ.py %s $@; }; export -f %s;'%(prog, prog, prog) for prog in passProgs])
+			sanCmd = "%s %s"%(overloadStr, sanCmd)
 		# Run the command
-		proc = sp.Popen(sanCmd, stdout=sp.PIPE, stderr=sp.PIPE, shell=True)
+		proc = sp.Popen(sanCmd, stdout=sp.PIPE, stderr=sp.PIPE, env=os.environ, shell=True)
 		popenArray[pid] = proc.pid
 		# Get the output / Block
 		so, se = proc.communicate()
-		if splitCmd[0] in ('srun',): # interactive
+		if csock: # interactive
 			rc = str(proc.returncode)
 			sizes = map(len, (so, se, rc))
 			sizeString = ','.join(map(str, sizes))
@@ -354,10 +375,11 @@ def worker(pid, host):
 			csock.sendall(sizeString)
 			logger.debug("%s worker sending: %s"%(host, msg))
 			csock.sendall(msg)
-		# Close client socket
-		csock.close()
+			# Close client socket
+			csock.close()
 		# Finish task in queue
 		wQ.task_done()
+		states[pid] = 0
 	wQ.task_done()
 
 def startThreads(nodeList):
@@ -376,6 +398,8 @@ def startThreads(nodeList):
 	threadArray = []
 	global popenArray
 	popenArray = [0]*len(nodeList)*ppn
+	global states
+	states = [0]*len(nodeList)*ppn
 	for j in xrange(ppn):
 		for i in xrange(len(nodeList)):
 			tID = len(nodeList)*j+i
@@ -413,19 +437,8 @@ def processTasks(srvsock, cansock, mp, threadArray):
 	srvsock.settimeout(2)
 	cansock.settimeout(2)
 	taskCounter = 1
+	global states
 	while 1:
-		try:
-			wQ.put((srvsock.accept(),taskCounter))
-			taskCounter += 1
-			logger.debug("Server accepted a connection")
-		except socket.timeout:
-			logger.debug("Checking status of main process")
-			pass
-		except KeyboardInterrupt:
-			logger.debug("Received keyboard interrupt")
-			os.killpg(os.getpgid(mp.pid), signal.SIGTERM)
-			kill(srvsock, threadArray)
-			break
 		try:
 			cancelmsg, (h,a) = cansock.accept()
 			cancelmsg.send('1')
@@ -438,9 +451,31 @@ def processTasks(srvsock, cansock, mp, threadArray):
 			logger.debug("Received keyboard interrupt")
 			os.killpg(os.getpgid(mp.pid), signal.SIGTERM)
 			kill(srvsock, threadArray)
-		if mp.poll() is not None:
-			logger.info("Main process complete")
-			logger.info("Stopping server and waiting for jobs to complete")
+		try:
+			#wQ.put((srvsock.accept(),taskCounter))
+			item = srvsock.accept()
+			logger.debug("Server accepted a connection")
+			csock, (h,a) = item+tuple()
+			if int(csock.recv(1)): #Interactive
+				wQ.put((item+tuple(), taskCounter))
+				logger.debug("Server held an interactive session %i"%(taskCounter))
+			else:
+				csock.send('1')
+				msg = csock.recv(5000)
+				csock.close()
+				wQ.put(((msg,), taskCounter))
+				logger.debug("Server accepted %i: %s"%(taskCounter, msg))
+			taskCounter += 1
+		except socket.timeout:
+			logger.debug("Checking status of main process")
+			if (mp.poll() is not None) and not sum(states):
+				logger.info("Main process complete")
+				logger.info("Stopping server and waiting for jobs to complete")
+				break
+		except KeyboardInterrupt:
+			logger.debug("Received keyboard interrupt")
+			os.killpg(os.getpgid(mp.pid), signal.SIGTERM)
+			kill(srvsock, threadArray)
 			break
 
 def stop(srvsock, nodeList):
