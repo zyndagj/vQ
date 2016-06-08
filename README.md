@@ -206,3 +206,4 @@ c442-001.stampede.tacc.utexas.edu
 * Support SGE, TORQUE, and LSF
 * Support execution on Xeon Phi accelerators
 * Support greedy scheduling with shared execution (`-n`)
+* Support array jobs for Canu
