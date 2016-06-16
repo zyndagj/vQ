@@ -1,0 +1,17 @@
+#!/bin/bash
+
+cat << "EOF" > hello.sh
+echo "Hello from" `hostname`
+EOF
+
+chmod +x hello.sh
+
+xargs -L 1 -I {} -P 2 bash -c '{}' <<"EOF"
+srun ./hello.sh
+srun ./hello.sh
+srun ./hello.sh
+srun ./hello.sh
+srun ./hello.sh
+EOF
+
+rm hello.sh
