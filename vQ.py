@@ -49,10 +49,10 @@ class SysConfig:
 		# TODO: add checks for lsf and pbs
 		if find_executable('srun'):
 			self.queue = 'slurm'
-			self.progs = ('srun','sbatch','scancel')
+			self.progs = {'srun':'i','sbatch':'b','scancel':'b'}
 		elif find_executable('qsub'):
 			self.queue = 'sge'
-			self.progs = ('qsub',)
+			self.progs = {'qrsh':'i','qsub':'b','qlogin':'i'}
 		else:
 			self.queue = 'vQ'
 		logger.debug("Detected %s scheduler"%(self.queue))
@@ -78,134 +78,101 @@ def sanitizeMsg(msg, prog):
 	stdout	Output file
 	stderr	Error file
 	name	Job name
+	array	Job array string
 	
 	>>> sanitizeMsg('cats -a -b two','srun')
-	('cats -a -b two', '', '', 'vQ_task')
+	('cats -a -b two', '', '', 'vQ_task', '')
 	>>> sanitizeMsg('cats','srun')
-	('cats', '', '', 'vQ_task')
+	('cats', '', '', 'vQ_task', '')
 	>>> sanitizeMsg('-o out.txt cats -a -b two','srun')
-	('cats -a -b two', 'out.txt', '', 'vQ_task')
+	('cats -a -b two', 'out.txt', '', 'vQ_task', '')
 	>>> sanitizeMsg('-a cats -b two','srun')
 	Traceback (most recent call last):
 	SystemExit: 1
 	>>> sanitizeMsg('-e out.txt cats -a -b two','srun')
-	('cats -a -b two', '', 'out.txt', 'vQ_task')
+	('cats -a -b two', '', 'out.txt', 'vQ_task', '')
+	>>> sanitizeMsg('--error=out.txt cats -a -b two','srun')
+	('cats -a -b two', '', 'out.txt', 'vQ_task', '')
+	>>> sanitizeMsg('-a 1-2 --error=out.txt cats -a -b two','srun')
+	Traceback (most recent call last):
+	SystemExit: 1
+	>>> sanitizeMsg('-a 1-2 --error=out.txt cats -a -b two','sbatch')
+	('cats -a -b two', '', 'out.txt', 'vQ_task', '1-2')
+	>>> sanitizeMsg('--array=1-2 --error=out.txt cats -a -b two','sbatch')
+	('cats -a -b two', '', 'out.txt', 'vQ_task', '1-2')
 	>>> sanitizeMsg('-J cat_tasks -e out.txt cats -a -b two','srun')
-	('cats -a -b two', '', 'out.txt', 'cat_tasks')
+	('cats -a -b two', '', 'out.txt', 'cat_tasks', '')
 	'''
 	sMsg = msg.split(' ')
-	out, err, name = ('','','')
+	arrayDict = {'out':'', 'error':'', 'name':'', 'array':''}
 	if prog == 'srun':
-		slurmNA = [("-O", "--overcommit"), ("-q", "--quit-on-interrupt"), ("-Q", "--quiet"), ("-k", "--no-kill"), ("-E", "--preserve-env"), ("-H", "--hold"), ("-K", "--kill-on-bad-exit"), ("-l", "--label"), ("-s", "--share"), ("-u", "--unbuffered"), ("-v", "--verbose"), ("-X", "--disable-status"), ("-Z", "--no-allocate"), ("-h", "--help"), ("-V", "--version")]
-		slurmA = [("-A", "--account=name"), ("-c", "--cpus-per-task=ncpus"), ("-d", "--dependency=type:jobid"), ("-D", "--chdir=path"), ("-e", "--error=err"), ("-i", "--input=in"), ("-I", "--immediate[=secs]"), ("-J", "--job-name=jobname"), ("-L", "--licenses=names"), ("-m", "--distribution=type"), ("-n", "--ntasks=ntasks"), ("-N", "--nodes=N"), ("-o", "--output=out"), ("-p", "--partition=partition"), ("-r", "--relative=n"), ("-S", "--core-spec=cores"), ("-T", "--threads=threads"), ("-t", "--time=minutes"), ("-W", "--wait=sec"), ("-C", "--constraint=list"), ("-w", "--nodelist=hosts..."), ("-x", "--exclude=hosts..."), ("-B", "--extra-node-info=S[:C[:T]]")]
-		argI = 0
-		while argI < len(sMsg):
-			if sMsg[argI][0] != '-':
-				break
-			# Double dash
-			elif sMsg[argI][1] == '-':
-				# No args
-				if '=' not in sMsg[argI]:
-					if sMsg[argI] in map(lambda x:x[1], slurmNA):
-						pass
-					else:
-						logger.error('Non-srun argument before CMD: %s'%(msg))
-						sys.exit(1)
-				else:
-					arg, val = sMsg[argI].split('=')
-					if arg in map(lambda x:x[1].split('=')[0], slurmNA):
-						if not val:
-							logger.error('%s should have a value for srun'%(sMsg[argI]))
-							logger.error(msg)
-							sys.exit(1)
-						elif arg == '--output':
-							out = val
-						elif arg == '--error':
-							err = val
-						elif arg == '--job-name':
-							name = val
-					else:
-						logger.error('Non-srun argument before CMD: %s'%(msg))
-						sys.exit(1)
-					
-			# Single dash
-			else:
-				# No args
-				if sMsg[argI] in map(lambda x: x[0], slurmNA):
-					pass
-				# Args
-				elif sMsg[argI] in map(lambda x: x[0], slurmA):
-					if sMsg[argI+1][0] == '-':
-						logger.error('%s should have a value for srun: %s'%(sMsg[argI]), msg)
-						sys.exit(1)
-					elif sMsg[argI] == '-o':
-						out = sMsg[argI+1]
-					elif sMsg[argI] == '-e':
-						err = sMsg[argI+1]
-					elif sMsg[argI] == '-J':
-						name = sMsg[argI+1]
-					argI += 1
-				else:
-					logger.error('Non-srun argument before CMD: %s'%(msg))
+		noArg = [("-O", "--overcommit"), ("-q", "--quit-on-interrupt"), ("-Q", "--quiet"), ("-k", "--no-kill"), ("-E", "--preserve-env"), ("-H", "--hold"), ("-K", "--kill-on-bad-exit"), ("-l", "--label"), ("-s", "--share"), ("-u", "--unbuffered"), ("-v", "--verbose"), ("-X", "--disable-status"), ("-Z", "--no-allocate"), ("-h", "--help"), ("-V", "--version")]
+		arg = [("-A", "--account=name"), ("-c", "--cpus-per-task=ncpus"), ("-d", "--dependency=type:jobid"), ("-D", "--chdir=path"), ("-e", "--error=err"), ("-i", "--input=in"), ("-I", "--immediate[=secs]"), ("-J", "--job-name=jobname"), ("-L", "--licenses=names"), ("-m", "--distribution=type"), ("-n", "--ntasks=ntasks"), ("-N", "--nodes=N"), ("-o", "--output=out"), ("-p", "--partition=partition"), ("-r", "--relative=n"), ("-S", "--core-spec=cores"), ("-T", "--threads=threads"), ("-t", "--time=minutes"), ("-W", "--wait=sec"), ("-C", "--constraint=list"), ("-w", "--nodelist=hosts..."), ("-x", "--exclude=hosts..."), ("-B", "--extra-node-info=S[:C[:T]]")]
+		track = {'-o':'out', '--outupt':'out',\
+			'-e':'error', '--error':'error',\
+			'-J':'name', '--job-name':'name'}
+	elif prog == 'sbatch':
+		noArg = [("-O", "--overcommit"), ("-q", "--quit-on-interrupt"), ("-Q", "--quiet"), ("-k", "--no-kill"), ("-E", "--preserve-env"), ("-H", "--hold"), ("-K", "--kill-on-bad-exit"), ("-l", "--label"), ("-s", "--share"), ("-u", "--unbuffered"), ("-v", "--verbose"), ("-X", "--disable-status"), ("-Z", "--no-allocate"), ("-h", "--help"), ("-V", "--version")]
+		arg = [("-A", "--account=name"), ("-c", "--cpus-per-task=ncpus"), ("-d", "--dependency=type:jobid"), ("-D", "--chdir=path"), ("-e", "--error=err"), ("-i", "--input=in"), ("-I", "--immediate[=secs]"), ("-J", "--job-name=jobname"), ("-L", "--licenses=names"), ("-m", "--distribution=type"), ("-n", "--ntasks=ntasks"), ("-N", "--nodes=N"), ("-o", "--output=out"), ("-p", "--partition=partition"), ("-r", "--relative=n"), ("-S", "--core-spec=cores"), ("-T", "--threads=threads"), ("-t", "--time=minutes"), ("-W", "--wait=sec"), ("-C", "--constraint=list"), ("-w", "--nodelist=hosts..."), ("-x", "--exclude=hosts..."), ("-B", "--extra-node-info=S[:C[:T]]"), ("-a", "--array=indexes"), ("-M", "--clusters=names"), ("-F", "--nodefile=filename")]
+		track = {'-o':'out', '--outupt':'out',\
+			'-e':'error', '--error':'error',\
+			'-J':'name', '--job-name':'name',\
+			'-a':'array', '--array':'array'}
+	else:
+		logger.error("%s is currently not handled for submission"%(prog))
+		sys.exit(1)
+	noArgSD = set(map(lambda x:x[0], noArg))
+	noArgDD = set(map(lambda x:x[1], noArg))
+	argSD = set(map(lambda x:x[0], arg))
+	argDD = set(map(lambda x:x[1].split('=')[0], arg))
+	argI = 0
+	while argI < len(sMsg):
+		param = sMsg[argI]
+		if param[0] != '-':
+		# Moved into non slurm argument space
+			break
+		elif param[1] == '-':
+		# Double dash parameter
+			if '=' not in param:
+			# No args
+				if param in argDD:
+					logger.error('%s has parameter %s without argument'%(prog, sMsg[argI]))
 					sys.exit(1)
-			argI += 1
-	if prog == 'sbatch':
-		slurmNA = [("-O", "--overcommit"), ("-q", "--quit-on-interrupt"), ("-Q", "--quiet"), ("-k", "--no-kill"), ("-E", "--preserve-env"), ("-H", "--hold"), ("-K", "--kill-on-bad-exit"), ("-l", "--label"), ("-s", "--share"), ("-u", "--unbuffered"), ("-v", "--verbose"), ("-X", "--disable-status"), ("-Z", "--no-allocate"), ("-h", "--help"), ("-V", "--version")]
-		slurmA = [("-A", "--account=name"), ("-c", "--cpus-per-task=ncpus"), ("-d", "--dependency=type:jobid"), ("-D", "--chdir=path"), ("-e", "--error=err"), ("-i", "--input=in"), ("-I", "--immediate[=secs]"), ("-J", "--job-name=jobname"), ("-L", "--licenses=names"), ("-m", "--distribution=type"), ("-n", "--ntasks=ntasks"), ("-N", "--nodes=N"), ("-o", "--output=out"), ("-p", "--partition=partition"), ("-r", "--relative=n"), ("-S", "--core-spec=cores"), ("-T", "--threads=threads"), ("-t", "--time=minutes"), ("-W", "--wait=sec"), ("-C", "--constraint=list"), ("-w", "--nodelist=hosts..."), ("-x", "--exclude=hosts..."), ("-B", "--extra-node-info=S[:C[:T]]"), ("-a", "--array=indexes"), ("-M", "--clusters=names"), ("-F", "--nodefile=filename")]
-		argI = 0
-		while argI < len(sMsg):
-			if sMsg[argI][0] != '-':
-				break
-			# Double dash
-			elif sMsg[argI][1] == '-':
-				# No args
-				if '=' not in sMsg[argI]:
-					if sMsg[argI] in map(lambda x:x[1], slurmNA):
-						pass
-					else:
-						logger.error('Non-sbatch argument before CMD: %s'%(msg))
-						sys.exit(1)
-				else:
-					arg, val = sMsg[argI].split('=')
-					if arg in map(lambda x:x[1].split('=')[0], slurmNA):
-						if not val:
-							logger.error('%s should have a value for srun'%(sMsg[argI]))
-							logger.error(msg)
-							sys.exit(1)
-						elif arg == '--output':
-							out = val
-						elif arg == '--error':
-							err = val
-						elif arg == '--job-name':
-							name = val
-					else:
-						logger.error('Non-sbatch argument before CMD: %s'%(msg))
-						pass
-						#sys.exit(1)
-					
-			# Single dash
-			else:
-				# No args
-				if sMsg[argI] in map(lambda x: x[0], slurmNA):
-					pass
-				# Args
-				elif sMsg[argI] in map(lambda x: x[0], slurmA):
-					if sMsg[argI+1][0] == '-':
-						logger.error('%s should have a value for srun: %s'%(sMsg[argI], msg))
-						sys.exit(1)
-					elif sMsg[argI] == '-o':
-						out = sMsg[argI+1]
-					elif sMsg[argI] == '-e':
-						err = sMsg[argI+1]
-					elif sMsg[argI] == '-J':
-						name = sMsg[argI+1]
-					argI += 1
-				else:
-					logger.error('Non-srun argument before CMD: %s'%(msg))
+				elif param not in noArgDD:
+					logger.error("Non-%s paramer found"%(prog))
 					sys.exit(1)
-			argI += 1
-	if not name: name = 'vQ_task'
-	return (' '.join(sMsg[argI:]), out, err, name)
+				else:
+					pass
+			else:
+			# Args
+				par, arg = param.split('=')
+				if par not in argDD:
+					logger.error('Non-%s parameter %s found with argument %s'%(prog, par, arg))
+					sys.exit(1)
+				else:
+					if par in track:
+						arrayDict[track[par]] = arg
+					else:
+						pass
+		else:
+		# Single dash
+			if param in noArgSD:
+				pass
+			elif param in argSD:
+				argI += 1
+				arg = sMsg[argI]
+				if param in track:
+					arrayDict[track[param]] = arg
+				else:
+					pass
+			else:
+				logger.error("Non-%s parameter %s found"%(prog, param))
+				sys.exit(1)
+				
+		argI += 1
+	if not arrayDict['name']:
+		arrayDict['name'] = 'vQ_task'
+	return (' '.join(sMsg[argI:]), arrayDict['out'], arrayDict['error'], arrayDict['name'], arrayDict['array'])
 
 def clientSendWork(clisock):
 	# Send command
