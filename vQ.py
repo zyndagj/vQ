@@ -309,7 +309,7 @@ def worker(pid, host):
 		logger.debug("%s worker got: %s"%(host, cmd))
 		# Sanitize the cmd of scheduler arguments
 		splitCmd = cmd.split(' ')
-		sanCmd, sOut, sErr, jName = sanitizeMsg(' '.join(splitCmd[1:]), splitCmd[0]) 
+		sanCmd, sOut, sErr, jName, jArray = sanitizeMsg(' '.join(splitCmd[1:]), splitCmd[0]) 
 		# Make a task name with counter
 		taskName = "%s_%05i"%(jName,taskCounter)
 		# Force redirrection on non-interactive commands
