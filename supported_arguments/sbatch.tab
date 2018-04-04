@@ -1,0 +1,42 @@
+#Short	Long	long-sep	track
+-O	--overcommit
+-q	--quit-on-interrupt
+-Q	--quiet
+-k	--no-kill
+-E	--preserve-env
+-H	--hold
+-K	--kill-on-bad-exit
+-l	--label
+-s	--share
+-u	--unbuffered
+-v	--verbose
+-X	--disable-status
+-Z	--no-allocate
+-h	--help
+-V	--version
+-A	--account	=
+-c	--cpus-per-task	=
+-d	--dependency	=
+-D	--chdir	=
+-e	--error	=	error
+-i	--input	=
+-I	--immediate	=
+-J	--job-name	=	name
+-L	--licenses	=
+-m	--distribution	=
+-n	--ntasks	=
+-N	--nodes	=
+-o	--output	=	out
+-p	--partition	=
+-r	--relative	=
+-S	--core-spec	=
+-T	--threads	=
+-t	--time	=
+-W	--wait	=
+-C	--constraint	=
+-w	--nodelist	=
+-x	--exclude	=
+-B	--extra-node-info	=
+-a	--array	=	array
+-M	--clusters	=
+-F	--nodefile	=

@@ -63,6 +63,162 @@ class SysConfig:
 		self.env = ' '.join(["%s=%s"%(k,v) for k,v in os.environ.iteritems() if regex.search(k)])
 	#def getCPUs(self):
 
+###############################
+# Main server class
+###############################
+class VqServer:
+	def __init__(self, nodeList):
+		self.nodeList = nodeList
+		self.wQ = Queue()
+		self.ppn = os.environ.get("VQ_PPN")
+		if self.ppn:
+			self.ppn = int(self.ppn)
+		else:
+			self.ppn = 1
+		self.threadArray = []
+		self.mainCmd = ' '.join(sys.argv[1:])
+	def startWorkers(self):
+		self.processArray = [0]*len(self.nodeList)*self.ppn
+		self.workerStates = [0]*len(self.nodeList)*self.ppn
+		logger.info("Starting server with %i processes per node"%(self.ppn))
+		for j in xrange(self.ppn):
+			for i in xrange(len(self.nodeList)):
+				tID = len(self.nodeList)*j+i
+				self.threadArray.append(Thread(target=worker, args=[tID, self.nodeList[i]]))
+				self.threadArray[tID].daemon = True
+				self.threadArray[tID].start()
+		logger.debug('vQ server started with %i workers'%(len(self.threadArray)))
+	def startServer(self, port=23000, timeout=2):
+		# Start the batch sever
+		self.srvsock = socket.socket( socket.AF_INET, socket.SOCK_STREAM )
+		self.srvsock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+		self.srvsock.bind( ('localhost', port) )
+		self.srvsock.listen(10)
+		logger.info('vQ server started on port %i'%(port))
+		# Start the cancel server
+		self.cansock = socket.socket( socket.AF_INET, socket.SOCK_STREAM )
+		self.cansock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+		self.cansock.bind( ('localhost', port+1) )
+		self.cansock.listen(10)
+		logger.info('vQ cancel listener started on port %i'%(port+1))
+		# Set the timeout
+		self.srvsock.settimeout(timeout)
+		self.cansock.settimeout(timeout)
+	def runCMD(self, progs):
+		logger.info("Overloading %s"%(', '.join(progs)))
+		overloadStr = ' '.join(['%s () { vQ.py %s \$@; }; export -f %s;'%(prog, prog, prog) for prog in progs])
+		unsetStr = ' '.join(['unset -f %s;'%(prog) for prog in progs])
+		logger.info("Launching: %s"%(mainCmd))
+		self.mainProcess = sp.Popen('bash -c "%s %s; %s"'%(overloadStr, mainCmd, unsetStr), shell=True)
+	def listen(self, taskCounter=1):
+		while 1:
+			# Listen for cancel command
+			try:
+				cancelmsg, (h,a) = cansock.accept()
+				cancelmsg.send('1')
+				if cancelmsg.recv(1) == '1':
+					logger.warn("vQ received cancel request")
+					self.kill()
+			except socket.timeout:
+				pass
+			except KeyboardInterrupt:
+				logger.debug("Received keyboard interrupt")
+				self.kill()
+			# Listen for queue command
+			try:
+				item = srvsock.accept()
+				logger.debug("Server accepted a connection")
+				csock, (h,a) = item+tuple()
+				# Interactive
+				if int(csock.recv(1)):
+					wQ.put((item+tuple(), taskCounter))
+					logger.debug("Server held an interactive session %i"%(taskCounter))
+				# Batch
+				else:
+					csock.send('1')
+					msg = csock.recv(5000)
+					csock.close()
+					# If job array, add all tasks
+					wQ.put(((msg,), taskCounter))
+					logger.debug("Server accepted %i: %s"%(taskCounter, msg))
+				taskCounter += 1
+			except socket.timeout:
+				logger.debug("Checking status of main process")
+				if (self.mainProcess.poll() is not None) and not sum(self.workerStates):
+					logger.info("Main process complete")
+					logger.info("Stopping server and waiting for jobs to complete")
+					break
+			except KeyboardInterrupt:
+				logger.debug("Received keyboard interrupt")
+				self.kill()
+		self.stop()
+	def closeSocks(self):
+		'''
+		Closes all server sockets.
+		'''
+		self.srvsock.close()
+		self.cansock.close()
+	def stop(self):
+		'''
+		Blocks new tasks from submission, waits for jobs to complete,
+		and then stops all workers and exits.
+		'''
+		self.closeSocks()
+		logger.info("Blocking queue for work to finish")
+		self.wQ.join()
+		logger.info("Work finished")
+		for i in xrange(len(self.threadArray)):
+			self.wQ.put("STOP")
+		self.wQ.join()
+		logger.info("Workers stopped and queue destroyed")
+	def kill(self):
+		'''
+		Kills all running tasks and exits.
+		'''
+		logger.info("Killing all processes and exiting.")
+		self.closeSocks()
+		# Kill work
+		for tID in xrange(len(self.processArray)):
+			if self.processArray[tID]:
+				os.killpg(os.getpgid(self.processArray[tID]), signal.SIGTERM)
+			self.threadArray[tID].join()
+		# Kill main process
+		os.killpg(os.getpgid(self.mainProcess), signal.SIGTERM)
+		logger.info("Done")
+		sys.exit(1)
+class sanitizer:
+	def __init__(self, tabFile):
+	noArgSD = set([])
+	noArgDD = set([])
+	argSD = set([])
+	argDD = set([])
+	sep = ''
+	track = {}
+	fileName = "%s.tab"%(tabFile)
+	if not os.path.exists(fileName):
+		logger.critical("No sanitization config %s"%(fileName))
+		sys.exit(1)
+	for line in open(tabFile, 'r'):
+		if line[0] != '#':
+			tmp = line.rstrip('\n').split('\t')
+			if len(tmp) == 2:
+				noArgSD.add(tmp[0])
+				noArgDD.add(tmp[1])
+			elif len(tmp) == 3:
+				argSD.add(tmp[0])
+				argDD.add(tmp[1])
+				sep = tmp[2]
+			elif len(tmp) == 4:
+				argSD.add(tmp[0])
+				argDD.add(tmp[1])
+				sep = tmp[2]
+				track[tmp[0]] = tmp[3]
+				track[tmp[1]] = tmp[3]
+			else:
+				logger.critical("The sanitization config %s should not have more %i columns"%(tabFile, len(tmp))
+	return noArgSD, noArgDD, argSD, argDD, sep, track
+		
+
 def sanitizeMsg(msg, prog):
 	'''
 	Function to sanitize out scheduler messages from the individual tasks.
@@ -104,27 +260,7 @@ def sanitizeMsg(msg, prog):
 	('cats -a -b two', '', 'out.txt', 'cat_tasks', '')
 	'''
 	sMsg = msg.split(' ')
-	arrayDict = {'out':'', 'error':'', 'name':'', 'array':''}
-	if prog == 'srun':
-		noArg = [("-O", "--overcommit"), ("-q", "--quit-on-interrupt"), ("-Q", "--quiet"), ("-k", "--no-kill"), ("-E", "--preserve-env"), ("-H", "--hold"), ("-K", "--kill-on-bad-exit"), ("-l", "--label"), ("-s", "--share"), ("-u", "--unbuffered"), ("-v", "--verbose"), ("-X", "--disable-status"), ("-Z", "--no-allocate"), ("-h", "--help"), ("-V", "--version")]
-		arg = [("-A", "--account=name"), ("-c", "--cpus-per-task=ncpus"), ("-d", "--dependency=type:jobid"), ("-D", "--chdir=path"), ("-e", "--error=err"), ("-i", "--input=in"), ("-I", "--immediate[=secs]"), ("-J", "--job-name=jobname"), ("-L", "--licenses=names"), ("-m", "--distribution=type"), ("-n", "--ntasks=ntasks"), ("-N", "--nodes=N"), ("-o", "--output=out"), ("-p", "--partition=partition"), ("-r", "--relative=n"), ("-S", "--core-spec=cores"), ("-T", "--threads=threads"), ("-t", "--time=minutes"), ("-W", "--wait=sec"), ("-C", "--constraint=list"), ("-w", "--nodelist=hosts..."), ("-x", "--exclude=hosts..."), ("-B", "--extra-node-info=S[:C[:T]]")]
-		track = {'-o':'out', '--outupt':'out',\
-			'-e':'error', '--error':'error',\
-			'-J':'name', '--job-name':'name'}
-	elif prog == 'sbatch':
-		noArg = [("-O", "--overcommit"), ("-q", "--quit-on-interrupt"), ("-Q", "--quiet"), ("-k", "--no-kill"), ("-E", "--preserve-env"), ("-H", "--hold"), ("-K", "--kill-on-bad-exit"), ("-l", "--label"), ("-s", "--share"), ("-u", "--unbuffered"), ("-v", "--verbose"), ("-X", "--disable-status"), ("-Z", "--no-allocate"), ("-h", "--help"), ("-V", "--version")]
-		arg = [("-A", "--account=name"), ("-c", "--cpus-per-task=ncpus"), ("-d", "--dependency=type:jobid"), ("-D", "--chdir=path"), ("-e", "--error=err"), ("-i", "--input=in"), ("-I", "--immediate[=secs]"), ("-J", "--job-name=jobname"), ("-L", "--licenses=names"), ("-m", "--distribution=type"), ("-n", "--ntasks=ntasks"), ("-N", "--nodes=N"), ("-o", "--output=out"), ("-p", "--partition=partition"), ("-r", "--relative=n"), ("-S", "--core-spec=cores"), ("-T", "--threads=threads"), ("-t", "--time=minutes"), ("-W", "--wait=sec"), ("-C", "--constraint=list"), ("-w", "--nodelist=hosts..."), ("-x", "--exclude=hosts..."), ("-B", "--extra-node-info=S[:C[:T]]"), ("-a", "--array=indexes"), ("-M", "--clusters=names"), ("-F", "--nodefile=filename")]
-		track = {'-o':'out', '--outupt':'out',\
-			'-e':'error', '--error':'error',\
-			'-J':'name', '--job-name':'name',\
-			'-a':'array', '--array':'array'}
-	else:
-		logger.error("%s is currently not handled for submission"%(prog))
-		sys.exit(1)
-	noArgSD = set(map(lambda x:x[0], noArg))
-	noArgDD = set(map(lambda x:x[1], noArg))
-	argSD = set(map(lambda x:x[0], arg))
-	argDD = set(map(lambda x:x[1].split('=')[0], arg))
+	noArgSD, noArgDD, argSD, argDD, sep, track = parseParams(prog)
 	argI = 0
 	while argI < len(sMsg):
 		param = sMsg[argI]
@@ -234,33 +370,17 @@ def main():
 	clisock = socket.socket( socket.AF_INET, socket.SOCK_STREAM )
 	connectError = clisock.connect_ex(('localhost', 23000))
 	if connectError: ## Could not connect to server
-		global serverConfig
-		serverConfig = SysConfig() # env, nodeList, cwd, hostName
 		clisock.close()
-		srvsock, cansock = startServer()
-		threadArray = startThreads(serverConfig.nodeList)
+		config = SysConfig() # env, nodeList, cwd, hostName
+		server = VqServer(config.nodeList)
+		server.startWorkers()
+		server.startServer()
 		# Run main process
-		mp = runCMD(serverConfig.progs)
+		server.runCMD(config.progs)
 		# Listen for incoming work
-		processTasks(srvsock, cansock, mp, threadArray)
-		# Shut down socket servers and wait for tasks to terminate
-		cansock.close()
-		stop(srvsock, serverConfig.nodeList)
+		server.listen()
 	else:
 		isInteractive = clientSendWork(clisock)
-
-def startServer(port=23000):
-	srvsock = socket.socket( socket.AF_INET, socket.SOCK_STREAM )
-	srvsock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-	srvsock.bind( ('localhost', port) )
-	srvsock.listen(5)
-	logger.info('vQ server started on port %i'%(port))
-	cansock = socket.socket( socket.AF_INET, socket.SOCK_STREAM )
-	cansock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-	cansock.bind( ('localhost', port+1) )
-	cansock.listen(5)
-	logger.info('vQ cancel listener started on port %i'%(port+1))
-	return srvsock, cansock
 
 def addRedirects(sanCmd, sOut, sErr):
 	'''
@@ -289,9 +409,9 @@ def addRedirects(sanCmd, sOut, sErr):
 		return sanCmd
 	return outCmd
 	
-
 # Start worker pool
 def worker(pid, host):
+	# Update this function to reflect the VqServer class
 	global popenArray
 	global states
 	for item, taskCounter in iter(wQ.get, 'STOP'):
@@ -348,114 +468,6 @@ def worker(pid, host):
 		wQ.task_done()
 		states[pid] = 0
 	wQ.task_done()
-
-def startThreads(nodeList):
-	# Needs to be global
-	global wQ
-	wQ = Queue()
-
-	# See if more than one process per node
-	ppn = os.environ.get("VQ_PPN")
-	if ppn:
-		ppn = int(ppn)
-		logger.info("Launching %i processes per node"%(ppn))
-	else:
-		ppn = 1
-
-	threadArray = []
-	global popenArray
-	popenArray = [0]*len(nodeList)*ppn
-	global states
-	states = [0]*len(nodeList)*ppn
-	for j in xrange(ppn):
-		for i in xrange(len(nodeList)):
-			tID = len(nodeList)*j+i
-			threadArray.append(Thread(target=worker, args=[tID, nodeList[i]]))
-			threadArray[tID].daemon = True
-			threadArray[tID].start()
-	logger.debug('vQ worker pool started with %i workers'%(len(threadArray)))
-	return threadArray
-
-def runCMD(progs):
-	# Run cmd in ARGS and overload srun
-	mainCmd = ' '.join(sys.argv[1:])
-	logger.info("Launching: %s"%(mainCmd))
-	logger.info("Overloading %s"%(', '.join(progs)))
-	overloadStr = ' '.join(['%s () { vQ.py %s \$@; }; export -f %s;'%(prog, prog, prog) for prog in progs])
-	unsetStr = ' '.join(['unset -f %s;'%(prog) for prog in progs])
-	mp = sp.Popen('bash -c "%s %s; %s"'%(overloadStr, mainCmd, unsetStr), shell=True)
-	return mp
-
-def kill(srvsock, threadArray):
-	global popenArray
-	# Kill srvsock so no new tasks can be added
-	srvsock.close()
-	for taskID in xrange(len(popenArray)):
-		# Kill popen work
-		if popenArray[taskID]:
-			os.killpg(os.getpgid(popenArray[taskID]), signal.SIGTERM)
-		# Kill threads
-		threadArray[i].join()
-	logger.info("Killed all work and exiting")
-	sys.exit(0)
-
-def processTasks(srvsock, cansock, mp, threadArray):
-	# Listen for incoming sockets
-	srvsock.settimeout(2)
-	cansock.settimeout(2)
-	taskCounter = 1
-	global states
-	while 1:
-		try:
-			cancelmsg, (h,a) = cansock.accept()
-			cancelmsg.send('1')
-			if cancelmsg.recv(1) == '1':
-				logger.warn("vQ received cancel request")
-				kill(srvsock, threadArray)
-		except socket.timeout:
-			pass
-		except KeyboardInterrupt:
-			logger.debug("Received keyboard interrupt")
-			os.killpg(os.getpgid(mp.pid), signal.SIGTERM)
-			kill(srvsock, threadArray)
-		try:
-			#wQ.put((srvsock.accept(),taskCounter))
-			item = srvsock.accept()
-			logger.debug("Server accepted a connection")
-			csock, (h,a) = item+tuple()
-			if int(csock.recv(1)): #Interactive
-				wQ.put((item+tuple(), taskCounter))
-				logger.debug("Server held an interactive session %i"%(taskCounter))
-			else:
-				csock.send('1')
-				msg = csock.recv(5000)
-				csock.close()
-				wQ.put(((msg,), taskCounter))
-				logger.debug("Server accepted %i: %s"%(taskCounter, msg))
-			taskCounter += 1
-		except socket.timeout:
-			logger.debug("Checking status of main process")
-			if (mp.poll() is not None) and not sum(states):
-				logger.info("Main process complete")
-				logger.info("Stopping server and waiting for jobs to complete")
-				break
-		except KeyboardInterrupt:
-			logger.debug("Received keyboard interrupt")
-			os.killpg(os.getpgid(mp.pid), signal.SIGTERM)
-			kill(srvsock, threadArray)
-			break
-
-def stop(srvsock, nodeList):
-	# Wait until remaining tasks are done
-	srvsock.close()
-	wQ.join()
-
-	# Stop workers
-	logger.info("Stopping workers... ")
-	for i in range(len(nodeList)):
-		wQ.put("STOP")
-	wQ.join()
-	logger.info("Stopped.")
 
 if __name__ == "__main__":
 	main()
